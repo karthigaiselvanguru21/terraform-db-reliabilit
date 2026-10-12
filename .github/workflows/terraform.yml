@@ -1,0 +1,102 @@
+name: CI - Terraform & Database Reliability
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  terraform:
+    name: Terraform (${{ matrix.environment }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [dev, prod]
+    defaults:
+      run:
+        working-directory: infra/envs/${{ matrix.environment }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.8.5
+          terraform_wrapper: false
+
+      - name: Check Terraform formatting
+        run: terraform fmt -check -recursive ../../..
+
+      - name: Initialize Terraform
+        run: terraform init -input=false
+
+      - name: Validate Terraform
+        run: terraform validate
+
+      - name: Generate Terraform plan
+        run: |
+          set -o pipefail
+          terraform plan -refresh=false -input=false -no-color -var-file=${{ matrix.environment }}.tfvars | tee terraform-plan.txt
+
+      - name: Publish plan artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-${{ matrix.environment }}
+          path: infra/envs/${{ matrix.environment }}/terraform-plan.txt
+          if-no-files-found: ignore
+
+  database-and-scripts:
+    name: Database & Script Reliability
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check script syntax
+        run: |
+          bash -n scripts/backup.sh
+          bash -n scripts/restore.sh
+
+      - name: Validate Docker Compose config
+        run: |
+          cp .env.example .env
+          docker compose config
+
+      - name: Start PostgreSQL database
+        run: |
+          docker compose up -d
+          echo "Waiting for database to report healthy status..."
+          timeout 60s bash -c 'until [ "$(docker inspect -f "{{.State.Health.Status}}" terraform-db-reliability-db 2>/dev/null)" = "healthy" ]; do sleep 2; done'
+          docker compose ps
+
+      - name: Verify row counts and constraints
+        run: |
+          docker compose exec -T db psql -U app -d bookings -c "SELECT COUNT(*) AS bookings FROM hotel_bookings;"
+          docker compose exec -T db psql -U app -d bookings -c "SELECT COUNT(*) AS events FROM booking_events;"
+
+      - name: Test reporting query and EXPLAIN plan
+        run: |
+          docker compose exec -T db psql -U app -d bookings -c "
+            EXPLAIN (ANALYZE, BUFFERS)
+            SELECT org_id, status, COUNT(*), SUM(amount)
+            FROM hotel_bookings
+            WHERE city = 'delhi'
+              AND created_at >= NOW() - INTERVAL '30 days'
+            GROUP BY org_id, status;"
+
+      - name: Test backup and restore end-to-end
+        run: |
+          chmod +x scripts/backup.sh scripts/restore.sh
+          ./scripts/backup.sh
+          ./scripts/restore.sh
+
+      - name: Cleanup Compose
+        if: always()
+        run: docker compose down -v

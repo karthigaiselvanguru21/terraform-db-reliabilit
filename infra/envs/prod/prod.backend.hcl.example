@@ -1,0 +1,17 @@
+# S3 Remote Backend Configuration Example for Prod
+# Usage:
+#   terraform init -backend-config=prod.backend.hcl
+#
+# Prerequisites:
+#   1. S3 bucket with versioning, server-side encryption (AES256 or aws:kms), and public access block enabled.
+#   2. DynamoDB table with primary key `LockID` (String) for state locking (or use_lockfile in Terraform >= 1.10).
+#   3. IAM permissions: s3:GetObject, s3:PutObject, s3:DeleteObject, s3:ListBucket, dynamodb:GetItem, dynamodb:PutItem, dynamodb:DeleteItem.
+
+bucket         = "replace-with-your-terraform-state-bucket"
+key            = "terraform-db-reliability/prod/terraform.tfstate"
+region         = "ap-south-1"
+encrypt        = true
+dynamodb_table = "terraform-locks"
+
+# S3 native locking support for Terraform >= 1.10 (optional alternative to dynamodb_table):
+# use_lockfile   = true
